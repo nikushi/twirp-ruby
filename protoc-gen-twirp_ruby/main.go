@@ -95,7 +95,7 @@ func (g *generator) generateRubyCode(file *descriptor.FileDescriptorProto, pbFil
 
 	var modules []string
 	if file.Options != nil && file.Options.RubyPackage != nil {
-		modules = strings.Split(*file.Options.RubyPackage, "::")
+		modules = strings.Split(*file.Options.RubyPackage, ".")
 	} else {
 		modules = splitRubyConstants(pkgName)
 	}
