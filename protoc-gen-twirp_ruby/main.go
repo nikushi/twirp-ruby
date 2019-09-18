@@ -28,7 +28,7 @@ import (
 	"github.com/golang/protobuf/protoc-gen-go/descriptor"
 	plugin "github.com/golang/protobuf/protoc-gen-go/plugin"
 
-	"github.com/twitchtv/twirp-ruby/internal/gen/typemap"
+	"github.com/nikushi/twirp-ruby/internal/gen/typemap"
 )
 
 func main() {
