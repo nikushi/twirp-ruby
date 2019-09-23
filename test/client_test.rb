@@ -254,6 +254,30 @@ class ClientTest < Minitest::Test
     assert_equal 'Expected response Content-Type "application/json" but found nil', resp.error.msg
   end
 
+  def test_json_missing_response_header_with_callback
+    on_error_called = false
+    Example::HaberdasherClient.on_error do |twerr, env|
+      on_error_called = true
+      assert_equal 'Expected response Content-Type "application/json" but found nil', twerr.msg
+      assert_equal :internal, twerr.code
+      assert_equal :MakeHat, env[:rpc_method]
+      assert_equal Example::Size, env[:input_class]
+      assert_equal Example::Hat, env[:output_class]
+      assert_equal :make_hat, env[:ruby_method]
+      assert_equal(Example::Size.new({}), env[:input])
+      assert_equal 200, env[:http_status]
+      assert_equal({}, env[:http_response_headers])
+      assert_nil env[:output]
+    end
+    c = Example::HaberdasherClient.new(conn_stub("/example.Haberdasher/MakeHat") {|req|
+      [200, {}, json(inches: 99, color: "red")]
+    }, content_type: "application/json")
+
+    c.make_hat({})
+    reset_callbacks(Example::HaberdasherClient)
+    assert on_error_called
+  end
+
 
   # Directly call .rpc
   # ------------------
@@ -266,6 +290,26 @@ class ClientTest < Minitest::Test
     assert_nil resp.error
     refute_nil resp.data
     assert_equal "out", resp.data.foo
+  end
+
+  def test_rpc_success_with_callback
+    on_success_called = false
+    FooClient.on_success do |env|
+      on_success_called = true
+      assert_equal :Foo, env[:rpc_method]
+      assert_equal Foo, env[:input_class]
+      assert_equal Foo, env[:output_class]
+      assert_equal :foo, env[:ruby_method]
+      assert_equal(Foo.new(foo: "in"), env[:input])
+      assert_equal 200, env[:http_status]
+      assert_equal({ "Content-Type" => "application/protobuf" }, env[:http_response_headers])
+      assert_equal Foo.new(foo: "out"), env[:output]
+    end
+    c = FooClient.new(conn_stub("/Foo/Foo") {|req|
+      [200, protoheader, proto(Foo, foo: "out")]
+    })
+    c.rpc :Foo, foo: "in"
+    assert on_success_called
   end
 
   def test_rpc_send_headers
@@ -290,6 +334,29 @@ class ClientTest < Minitest::Test
     assert_equal "dont like empty", resp.error.msg
   end
 
+  def test_rpc_error_with_callback
+    on_error_called = false
+    FooClient.on_error do |twerr, env|
+      on_error_called = true
+      assert_equal "dont like empty", twerr.msg
+      assert_equal :invalid_argument, twerr.code
+      assert_equal :Foo, env[:rpc_method]
+      assert_equal Foo, env[:input_class]
+      assert_equal Foo, env[:output_class]
+      assert_equal :foo, env[:ruby_method]
+      assert_equal(Foo.new(foo: ""), env[:input])
+      assert_equal 400, env[:http_status]
+      assert_equal({ 'X-Request-Id' => '077cacaa-3913-11e9-aacc-0242ac1c0002' }, env[:http_response_headers])
+      assert_nil env[:output]
+    end
+    c = FooClient.new(conn_stub("/Foo/Foo") {|req|
+      [400, { 'X-Request-Id' => '077cacaa-3913-11e9-aacc-0242ac1c0002' }, json(code: "invalid_argument", msg: "dont like empty")]
+    })
+    c.rpc :Foo, foo: ""
+    reset_callbacks(FooClient)
+    assert on_error_called
+  end
+
   def test_rpc_serialization_exception
     c = FooClient.new(conn_stub("/Foo/Foo") {|req|
       [200, protoheader, "badstuff"]
@@ -305,6 +372,100 @@ class ClientTest < Minitest::Test
     assert_nil resp.data
     refute_nil resp.error
     assert_equal :bad_route, resp.error.code
+  end
+
+  def test_rpc_invalid_method_with_callback
+    on_error_called = false
+    FooClient.on_error do |twerr, env|
+      on_error_called = true
+      assert_equal "rpc not defined on this client", twerr.msg
+      assert_equal :bad_route, twerr.code
+      assert_equal({}, env)
+    end
+    c = FooClient.new("http://localhost")
+    c.rpc :OtherStuff, foo: "noo"
+    reset_callbacks(FooClient)
+    assert on_error_called
+  end
+
+  def test_before_callback
+    before_called = false
+    FooClient.before do |env|
+      before_called = true
+      assert_equal :Foo, env[:rpc_method]
+      assert_equal Foo, env[:input_class]
+      assert_equal Foo, env[:output_class]
+      assert_equal :foo, env[:ruby_method]
+      assert_equal(Foo.new(foo: "in"), env[:input])
+    end
+    c = FooClient.new(conn_stub("/Foo/Foo") {|req|
+      [200, protoheader, proto(Foo, foo: "out")]
+    })
+    c.rpc :Foo, foo: "in"
+    reset_callbacks(FooClient)
+    assert before_called
+  end
+
+  def test_global_callbacks_with_success
+    before_called = false
+    on_success_called = false
+    Twirp::Client.before { |env| before_called = true }
+    Twirp::Client.on_success { |env| on_success_called = true }
+    c = FooClient.new(conn_stub("/Foo/Foo") {|req|
+      [200, protoheader, proto(Foo, foo: "out")]
+    })
+    c.rpc :Foo, foo: "in"
+    reset_callbacks(Twirp::Client)
+    assert before_called
+    assert on_success_called
+  end
+
+  def test_global_callbacks_with_error
+    on_error_called = false
+    Twirp::Client.before { |env| before_called = true }
+    Twirp::Client.on_error { |env| on_error_called = true }
+    c = FooClient.new(conn_stub("/Foo/Foo") {|req|
+      [400, {}, json(code: "invalid_argument", msg: "dont like empty")]
+    })
+    c.rpc :Foo, foo: ""
+    reset_callbacks(Twirp::Client)
+    assert on_error_called
+  end
+
+  def test_callbacks_on_concrete_and_base_classes_with_success
+    before_called1 = false
+    before_called2 = false
+    on_success_called1 = false
+    on_success_called2 = false
+    Twirp::Client.before { |env| before_called1 = true }
+    FooClient.before { |env| before_called2 = true }
+    Twirp::Client.on_success { |env| on_success_called1 = true }
+    FooClient.on_success{ |env| on_success_called2 = true }
+    c = FooClient.new(conn_stub("/Foo/Foo") {|req|
+      [200, protoheader, proto(Foo, foo: "out")]
+    })
+    c.rpc :Foo, foo: "in"
+    reset_callbacks(Twirp::Client)
+    reset_callbacks(FooClient)
+    assert before_called1
+    assert before_called2
+    assert on_success_called1
+    assert on_success_called2
+  end
+
+  def test_callbacks_on_concrete_and_base_classes_with_error
+    on_error_called1 = false
+    on_error_called2 = false
+    Twirp::Client.on_error { |env| on_error_called1 = true }
+    FooClient.on_error { |env| on_error_called2 = true }
+    c = FooClient.new(conn_stub("/Foo/Foo") {|req|
+      [400, {}, json(code: "invalid_argument", msg: "dont like empty")]
+    })
+    c.rpc :Foo, foo: ""
+    reset_callbacks(Twirp::Client)
+    reset_callbacks(FooClient)
+    assert on_error_called1
+    assert on_error_called2
   end
 
 
@@ -337,4 +498,9 @@ class ClientTest < Minitest::Test
     end
   end
 
+  def reset_callbacks(klass)
+    klass.instance_variable_set(:@before, nil)
+    klass.instance_variable_set(:@on_success, nil)
+    klass.instance_variable_set(:@on_error, nil)
+  end
 end

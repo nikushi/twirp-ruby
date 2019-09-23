@@ -21,6 +21,49 @@ require_relative 'service_dsl'
 module Twirp
 
   class Client
+    module Callbacks
+      def self.included(base)
+        base.extend ClassMethods
+      end
+
+      module ClassMethods
+        def before(&block)
+          @before ||= []
+          @before << block
+        end
+
+        def on_success(&block)
+          @on_success ||= []
+          @on_success << block
+        end
+
+        def on_error(&block)
+          @on_error ||= []
+          @on_error << block
+        end
+
+        def call_before_callbacks(env)
+          superclass.call_before_callbacks(env) if superclass.ancestors.include? Twirp::Client
+          return unless @before
+          @before.each { |hook| hook.call(env) }
+        end
+
+        def call_on_success_callbacks(env)
+          superclass.call_on_success_callbacks(env) if superclass.ancestors.include? Twirp::Client
+          return unless @on_success
+          @on_success.each { |hook| hook.call(env) }
+        end
+
+        def call_on_error_callbacks(twerr, env)
+          superclass.call_on_error_callbacks(twerr, env) if superclass.ancestors.include? Twirp::Client
+          return unless @on_error
+          @on_error.each { |hook| hook.call(twerr, env) }
+        end
+      end
+    end
+
+    # Set client callbacks
+    include Callbacks
 
     # DSL to define a client with package, service and rpcs.
     extend ServiceDSL
@@ -149,28 +192,43 @@ module Twirp
     # output_class, or a Twirp::Error. The input and output classes are the ones configued with the rpc DSL.
     # If rpc_method was not defined with the rpc DSL then a response with a bad_route error is returned instead.
     def rpc(rpc_method, input, req_opts=nil)
+      env = {}
       rpcdef = self.class.rpcs[rpc_method.to_s]
       if !rpcdef
-        return ClientResp.new(nil, Twirp::Error.bad_route("rpc not defined on this client"))
+        return error_response(Twirp::Error.bad_route("rpc not defined on this client"), env)
       end
+      env.merge!(rpcdef)
 
       content_type = (req_opts && req_opts[:headers] && req_opts[:headers]['Content-Type']) || @content_type
 
       input = rpcdef[:input_class].new(input) if input.is_a? Hash
       body = Encoding.encode(input, rpcdef[:input_class], content_type)
+      env[:input] = input
+      self.class.call_before_callbacks(env)
 
       resp = self.class.make_http_request(@conn, @service_full_name, rpc_method, content_type, req_opts, body)
+      env[:http_status] = resp.status
+      env[:http_response_headers] = resp.headers
       if resp.status != 200
-        return ClientResp.new(nil, self.class.error_from_response(resp))
+        return error_response(self.class.error_from_response(resp), env)
       end
 
       if resp.headers['Content-Type'] != content_type
-        return ClientResp.new(nil, Twirp::Error.internal("Expected response Content-Type #{content_type.inspect} but found #{resp.headers['Content-Type'].inspect}"))
+        return error_response(Twirp::Error.internal("Expected response Content-Type #{content_type.inspect} but found #{resp.headers['Content-Type'].inspect}"), env)
       end
 
       data = Encoding.decode(resp.body, rpcdef[:output_class], content_type)
+      env[:output] = data
+      self.class.call_on_success_callbacks(env)
+
       return ClientResp.new(data, nil)
     end
 
+    private
+
+    def error_response(twerr, env)
+      self.class.call_on_error_callbacks(twerr, env)
+      ClientResp.new(nil, twerr)
+    end
   end
 end
